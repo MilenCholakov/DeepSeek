@@ -375,10 +375,11 @@ void CheckTradingConditions()
    }
    
    // Логика за създаване на нова двойка ордери
-   if(tradeState == TRADE_STATE_IDLE)
-   {
-      CreatePendingOrders();
-   }
+   // Променете проверката за IDLE състояние:
+    if(tradeState == TRADE_STATE_IDLE && !CheckExistingPendingOrders())
+    {
+        CreatePendingOrders();
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -386,6 +387,12 @@ void CheckTradingConditions()
 //+------------------------------------------------------------------+
 void CreatePendingOrders()
 {
+   // Ако вече има чакащи ордери, не създавай нови
+   if(CheckExistingPendingOrders())
+    {
+        tradeState = TRADE_STATE_PENDING;
+        return;
+   }
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double pointValue = GetPointMultiplier();
@@ -610,18 +617,22 @@ void ManageGrid()
    if(!foundInitial) return;
    
    // Проверка дали трябва да се активира грид
-   double currentProfit = initialPosition.profit;
-   double activationThreshold = -InpGridActivation * GetPointMultiplier() * 
-                                SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE) * 
-                                initialPosition.volume;
-   
-   if(currentProfit <= activationThreshold && tradeState != TRADE_STATE_GRID_ACTIVE)
+   //double currentProfit = initialPosition.profit;
+   double currentPrice = (initialPosition.type == POSITION_TYPE_BUY) ? 
+                     SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                     SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                     
+   double priceDiff = MathAbs(currentPrice - initialPosition.openPrice);
+   double pointsDiff = priceDiff / GetPointMultiplier();
+
+   // Сега проверяваме точки, а не парично изражение
+   if(pointsDiff >= InpGridActivation && tradeState != TRADE_STATE_GRID_ACTIVE)
    {
       // Активиране на грида
       tradeState = TRADE_STATE_GRID_ACTIVE;
       gridLevels = 1; // Вече имаме едно ниво (първоначалната позиция)
-      DebugPrint("АКТИВАЦИЯ НА ГРИД! Загуба: " + DoubleToString(currentProfit, 2) + 
-                ", Праг: " + DoubleToString(activationThreshold, 2));
+      DebugPrint("АКТИВАЦИЯ НА ГРИД! Загуба: " + DoubleToString(priceDiff, 2) + 
+                ", Праг: " + DoubleToString(InpGridActivation, 2));
    }
    
    // Ако гридът е активен, проверка за нови нива
@@ -692,7 +703,7 @@ void OpenGridPosition(ENUM_POSITION_TYPE type, double price, int level)
 //+------------------------------------------------------------------+
 //| Проверка на условия за затваряне                                 |
 //+------------------------------------------------------------------+
-void CheckCloseConditions()
+/* void CheckCloseConditions()
 {
    if(activePositionsCount == 0) return;
    
@@ -765,8 +776,52 @@ void CheckCloseConditions()
          CloseAllPositions();
       }
    }
+} */
+void CheckCloseConditions()
+{
+    if(activePositionsCount == 0) return;
+    
+    // Намери първоначалната позиция
+    PositionInfo initialPos = {0};
+    for(int i = 0; i < activePositionsCount; i++)
+    {
+        if(activePositions[i].gridLevel == 0)
+        {
+            initialPos = activePositions[i];
+            break;
+        }
+    }
+    
+    if(initialPos.ticket == 0) return; // Няма първоначална позиция
+    
+    // Изчисли текущата цена и разликата в точки
+    double currentPrice = (initialPos.type == POSITION_TYPE_BUY) ? 
+                         SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                         SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    
+    double priceDiff = currentPrice - initialPos.openPrice;
+    if(initialPos.type == POSITION_TYPE_SELL) priceDiff = -priceDiff;
+    
+    double pointsDiff = priceDiff / GetPointMultiplier();
+    
+    // Проверка за Take Profit
+    if(pointsDiff >= InpTakeProfitPoints)
+    {
+        DebugPrint("ДОСТИГНАТ TP! Точки: " + DoubleToString(pointsDiff) + 
+                  ", Цел: " + DoubleToString(InpTakeProfitPoints));
+        CloseAllPositions();
+        return;
+    }
+    
+    // Проверка за максимална загуба
+    if(pointsDiff <= -InpMaxCycleLoss)
+    {
+        DebugPrint("ДОСТИГНАТА МАКС. ЗАГУБА! Точки: " + DoubleToString(pointsDiff) + 
+                  ", Лимит: " + DoubleToString(-InpMaxCycleLoss));
+        CloseAllPositions();
+        return;
+    }
 }
-
 //+------------------------------------------------------------------+
 //| Затваряне на всички позиции                                      |
 //+------------------------------------------------------------------+
@@ -837,3 +892,23 @@ void OnTrade()
    UpdateActivePositions();
 }
 //+------------------------------------------------------------------+
+
+bool CheckExistingPendingOrders()
+{
+    // Проверка за съществуващи BuyStop/SellStop ордери
+    for(int i = OrdersTotal()-1; i>=0; i--)
+    {
+        ulong ticket = OrderGetTicket(i);
+        if(OrderSelect(ticket))
+        {
+            if(OrderGetString(ORDER_SYMBOL) == _Symbol &&
+               OrderGetInteger(ORDER_MAGIC) == InpMagicNumber)
+            {
+                ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+                if(type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_SELL_STOP)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
